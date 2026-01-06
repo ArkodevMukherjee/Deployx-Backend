@@ -27,15 +27,23 @@ mongoose.connect('mongodb://127.0.0.1:27017/github-app')
 
 function generateAppJWT() {
   // Read your GitHub App private key (PEM file)
-  const privateKey = fs.readFileSync("D:\\express\\oauth-login\\private4.pem", 'utf8');
+  const path = require("path");
+
+  const privateKey = fs.readFileSync(
+    path.join(__dirname, "../private4.pem"),
+    "utf8"
+  );
+
+  // const privateKey = fs.readFileSync("D:\\DeployX\\backend\\private4.pem", 'utf8');
   const appId = process.env.GITHUB_APP_ID;
   console.log("App Id",appId);
 
   const payload = {
-    iat: Math.floor(Date.now() / 1000),       // issued at
-    exp: Math.floor(Date.now() / 1000) + 600, // expires after 10 minutes
-    iss: appId                                 // GitHub App ID
-  };
+  iat: Math.floor(Date.now() / 1000) - 60,
+  exp: Math.floor(Date.now() / 1000) + 9 * 60,
+  iss: appId
+};
+
 
   return jwt.sign(payload, privateKey, { algorithm: 'RS256' });
 }

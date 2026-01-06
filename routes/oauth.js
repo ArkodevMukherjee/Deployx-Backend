@@ -3,6 +3,8 @@ const express = require('express');
 const passport = require('passport');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { redis } = require("../redis");
+const crypto = require("crypto")
 
 const router = express.Router();
 const GitHubStrategy = require('passport-github2').Strategy;
@@ -40,23 +42,69 @@ passport.use(
 router.get('/', passport.authenticate('github', { scope: ['user:email'] }));
 
 // --- GitHub callback ---
-router.get('/callback',
-  passport.authenticate('github', { session: false, failureRedirect: '/oauth/failure' }),
+router.get(
+  "/callback",
+  passport.authenticate("github", {
+    session: false,
+    failureRedirect: "http://localhost:5173/login"
+  }),
   async (req, res) => {
     try {
-      // Issue JWT after successful OAuth
-      const token = jwt.sign(
-        { id: req.user._id, provider: 'github' },
-        process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+      const code = crypto.randomUUID();
+
+      // Using string arguments (EX = seconds)
+      await redis.set(
+        `oauth:${code}`,          // key
+        req.user._id.toString(),  // value
+        'EX',                     // option for expiration
+        60                        // expiration in seconds
       );
 
-      res.json({ message: 'GitHub login successful', token });
+
+      res.redirect(
+        `http://localhost:5173/login?code=${code}`
+      );
     } catch (err) {
-      res.status(500).json({ message: err.message });
+      console.error(err);
+      res.redirect("http://localhost:5173/login");
     }
   }
 );
+
+router.get("/deploy",(req,res)=>{
+  res.redirect("http://localhost:5173/deploy");
+})
+
+/* =========================
+   TOKEN EXCHANGE
+========================= */
+router.post("/exchange", async (req, res) => {
+  try {
+    const { code } = req.body;
+    console.log(code);
+
+    const userId = await redis.get(`oauth:${code}`);
+    if (!userId) {
+      return res.status(401).json({ error: "Invalid or expired code" });
+    }
+
+    await redis.del(`oauth:${code}`);
+
+    const token = jwt.sign(
+      { id: userId },
+      process.env.JWT_SECRET,
+      { expiresIn: "1hr" }
+    );
+
+    res.json({
+      success:true,
+      token
+    })
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
 // Optional failure route
 router.get('/failure', (req, res) => res.status(401).json({ message: 'OAuth failed' }));

@@ -29,13 +29,20 @@ app.use(
   })
 );
 
-app.use(cors());
+app.use(cors({
+  origin: "http://localhost:5173",
+  credentials:true
+}));
+
+
+
 
 // Routes
 app.use('/auth', authRouter);
 app.use('/auth/github', oauth);
 app.use('/webhook', webhookRouter); // ✅ now rawBody exists
-app.use('/deploy',require("./routes/deploy"))
+app.use('/deploy', require("./routes/deploy"))
+app.use('/dashboard', require("./routes/user"))
 
 app.get('/', (req, res) => {
   res.json({ message: 'API is running' });

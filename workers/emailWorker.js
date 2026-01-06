@@ -4,7 +4,8 @@ const { sendOtpEmail } = require('../services/email.service'); // your existing 
 
 const connection = new Redis({
   host: '127.0.0.1',
-  port: 6379
+  port: 6379,
+  maxRetriesPerRequest:null
 });
 
 const worker = new Worker('email-queue', async job => {

@@ -3,23 +3,19 @@ const mongoose = require('mongoose');
 
 const deploymentSchema = new mongoose.Schema({
   installationId: {
-    type: Number,
-    required: true
+    type: Number
   },
   userId:{
     type:String
   },
   repoId: {
-    type: Number,
-    required: true
+    type: Number
   },
   repoName: {
-    type: String,
-    required: true
+    type: String
   },
   fullName: {
-    type: String,
-    required: true
+    type: String
   },
   branchName: {
     type: String,
