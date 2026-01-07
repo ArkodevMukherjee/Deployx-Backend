@@ -3,13 +3,14 @@ set -e
 
 echo "🚀 Starting deployment..."
 
-# Validate env vars
+# Validate required environment variables
 : "${INSTALLATION_TOKEN:?Missing INSTALLATION_TOKEN}"
 : "${REPO_FULL_NAME:?Missing REPO_FULL_NAME}"
 : "${BRANCH:?Missing BRANCH}"
-: "${AZURE_ACCOUNT:?Missing AZURE_ACCOUNT}"
-: "${AZURE_STORAGE_KEY:?Missing AZURE_STORAGE_KEY}"
 : "${DEPLOY_PATH:?Missing DEPLOY_PATH}"
+: "${APPS_DIR:?Missing APPS_DIR}"  # e.g., /var/www/apps
+
+TARGET_DIR="$APPS_DIR/$DEPLOY_PATH"
 
 echo "📦 Cloning repository..."
 git clone -b "$BRANCH" \
@@ -21,24 +22,26 @@ cd repo
 echo "🔧 Installing dependencies..."
 npm install
 
-# 🔑 Tell Vite it is deployed in a subfolder
+# Tell Vite it’s deployed under a subpath
 export VITE_BASE_PATH="/$DEPLOY_PATH/"
-
-echo "🏗️ Building project..."
+echo "🏗️ Building React project with base path $VITE_BASE_PATH..."
 npm run build
 
-# Safety check
+# Ensure build exists
 if [ ! -d "dist" ]; then
   echo "❌ dist directory not found"
   exit 1
 fi
 
-echo "☁️ Uploading to Azure Blob Storage..."
-az storage blob upload-batch \
-  --account-name "$AZURE_ACCOUNT" \
-  --account-key "$AZURE_STORAGE_KEY" \
-  --destination "\$web/$DEPLOY_PATH" \
-  --source dist \
-  --overwrite
+echo "📁 Preparing target directory: $TARGET_DIR"
+rm -rf "$TARGET_DIR"
+mkdir -p "$TARGET_DIR"
+
+echo "📤 Copying SPA build to target directory..."
+cp -r dist/* "$TARGET_DIR/"
+
+echo "🔄 Fixing permissions..."
+chown -R node:node "$TARGET_DIR"
+chmod -R 755 "$TARGET_DIR"
 
 echo "✅ Deployment completed successfully!"
