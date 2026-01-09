@@ -46,7 +46,7 @@ router.get(
   "/callback",
   passport.authenticate("github", {
     session: false,
-    failureRedirect: "http://localhost:5173/login"
+    failureRedirect: "https://deployx-frontend.vercel.app/login"
   }),
   async (req, res) => {
     try {
@@ -62,17 +62,17 @@ router.get(
 
 
       res.redirect(
-        `http://localhost:5173/login?code=${code}`
+        `https://deployx-frontend.vercel.app/login?code=${code}`
       );
     } catch (err) {
       console.error(err);
-      res.redirect("http://localhost:5173/login");
+      res.redirect("https://deployx-frontend.vercel.app/login");
     }
   }
 );
 
 router.get("/deploy",(req,res)=>{
-  res.redirect("http://localhost:5173/deploy");
+  res.redirect("https://deployx-frontend.vercel.app/deploy");
 })
 
 /* =========================
@@ -110,3 +110,4 @@ router.post("/exchange", async (req, res) => {
 router.get('/failure', (req, res) => res.status(401).json({ message: 'OAuth failed' }));
 
 module.exports = router;
+

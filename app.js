@@ -12,8 +12,10 @@ const webhookRouter = require('./routes/webhook');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.set("trust proxy", 1);
+
 // DB
-mongoose.connect('mongodb://127.0.0.1:27017/github-app')
+mongoose.connect(`${process.env.MONGO_URI}/github-app`)
   .then(() => console.log('✅ MongoDB connected'))
   .catch(err => {
     console.error(err);
@@ -30,11 +32,14 @@ app.use(
 );
 
 app.use(cors({
-  origin: "http://localhost:5173",
-  credentials:true
+  origin: [
+    'https://neurastack.xyz',
+    'https://www.neurastack.xyz',
+     'https://deployx-frontend.vercel.app',
+     'https://frontend.neurastack.xyz',
+  ],
+  credentials: true
 }));
-
-
 
 
 // Routes
@@ -48,6 +53,6 @@ app.get('/', (req, res) => {
   res.json({ message: 'API is running' });
 });
 
-app.listen(PORT, () =>
+app.listen(PORT, '0.0.0.0', () =>
   console.log(`Server running on http://localhost:${PORT}`)
 );

@@ -7,7 +7,10 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory inside container
+# Create the deployment root directory inside the container
+RUN mkdir -p /var/www/apps && chmod 777 /var/www/apps
+
+# Set working directory for the build process
 WORKDIR /app
 
 # Copy deploy script

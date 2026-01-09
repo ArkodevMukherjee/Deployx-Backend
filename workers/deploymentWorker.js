@@ -1,53 +1,55 @@
-// workers/deploymentWorker.js
-require("dotenv").config();
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 const { Worker } = require('bullmq');
-const { exec } = require('child_process');
 const Deployment = require('../models/Deployments');
 const Redis = require("ioredis");
 const mongoose = require("mongoose");
-const fs = require("fs")
-const jwt = require("jsonwebtoken")
-const axios = require("axios")
+const fs = require("fs");
+const jwt = require("jsonwebtoken");
+const axios = require("axios");
+const { spawn } = require('child_process');
 
+// Redis Connection
 const connection = new Redis({
-    host: "127.0.0.1",
-    port: 6379,
-    maxRetriesPerRequest: null  // IMPORTANT for BullMQ
+  host: "127.0.0.1",
+  port: 6379,
+  maxRetriesPerRequest: null
 });
 
+connection.on("error", (err) => console.error("❌ Redis Connection Error:", err));
+connection.on("connect", () => console.log("✅ Worker connected to Redis"));
 
-mongoose.connect('mongodb://127.0.0.1:27017/github-app')
+const SHARED_APPS_DIR = '/var/www/apps';
+
+// MongoDB Connection
+mongoose.connect(`${process.env.MONGO_URI}/github-app`)
   .then(() => console.log('✅ MongoDB connected'))
   .catch(err => {
-    console.error(err);
+    console.error('❌ MongoDB Connection Error:', err);
     process.exit(1);
   });
 
-// const { generateAppJWT, getInstallationToken } = require('../utils/github');
-
+/**
+ * Generates a GitHub App JWT
+ */
 function generateAppJWT() {
-  // Read your GitHub App private key (PEM file)
-  const path = require("path");
-
-  const privateKey = fs.readFileSync(
-    path.join(__dirname, "../private4.pem"),
-    "utf8"
-  );
-
-  // const privateKey = fs.readFileSync("D:\\DeployX\\backend\\private4.pem", 'utf8');
+  const privateKeyPath = path.join(__dirname, "../private4.pem");
+  if (!fs.existsSync(privateKeyPath)) {
+    throw new Error(`Private key missing at: ${privateKeyPath}`);
+  }
+  const privateKey = fs.readFileSync(privateKeyPath, "utf8");
   const appId = process.env.GITHUB_APP_ID;
-  console.log("App Id",appId);
-
   const payload = {
-  iat: Math.floor(Date.now() / 1000) - 60,
-  exp: Math.floor(Date.now() / 1000) + 9 * 60,
-  iss: appId
-};
-
-
+    iat: Math.floor(Date.now() / 1000) - 60,
+    exp: Math.floor(Date.now() / 1000) + 9 * 60,
+    iss: appId
+  };
   return jwt.sign(payload, privateKey, { algorithm: 'RS256' });
 }
 
+/**
+ * Fetches GitHub Installation Access Token
+ */
 async function getInstallationToken(installationId, appJwt) {
   try {
     const response = await axios.post(
@@ -62,93 +64,102 @@ async function getInstallationToken(installationId, appJwt) {
     );
     return response.data.token;
   } catch (err) {
-    console.error('Error fetching installation token:', err.response?.data || err.message);
+    console.error('❌ Error fetching installation token:', err.response?.data || err.message);
     throw err;
   }
 }
 
-
+/**
+ * BullMQ Worker
+ */
 const worker = new Worker(
   'deployment-queue',
   async job => {
-    const {
-      deploymentId,
-      installationId,
-      fullName,
-      branchName,
-      deployPath
-    } = job.data;
+    const { deploymentId, installationId, fullName, branchName } = job.data;
+    console.log(`\n🚀 [Job ${job.id}] Received deployment for: ${fullName}`);
 
-    console.log("DeploymentWorker working");
+    const repoName = fullName.split('/')[1];
+    const deployPath = `${installationId}/${repoName}/${deploymentId}`;
 
-    // 1️⃣ Mark deployment as running
-    await Deployment.findByIdAndUpdate(deploymentId, {
-      status: 'in_progress'
-    });
+    await Deployment.findByIdAndUpdate(deploymentId, { status: 'in_progress' });
+
+    let combinedLogs = ""; // Variable to store build output
 
     try {
-      // 2️⃣ Generate GitHub installation token
+      console.log(`   [${job.id}] Generating GitHub JWT...`);
       const appJwt = generateAppJWT();
-      const installationToken = await getInstallationToken(
-        installationId,
-        appJwt
-      );
+      
+      console.log(`   [${job.id}] Fetching Installation Token...`);
+      const installationToken = await getInstallationToken(installationId, appJwt);
 
-      console.log("Installation Token",installationToken)
-
-
-      // 3️⃣ Run Docker container using spawn for better env handling
-      const { spawn } = require('child_process');
+      console.log(`   [${job.id}] Starting Docker container...`);
       const dockerArgs = [
-        'run',
+        'run', '--rm',
+        '-v', `${SHARED_APPS_DIR}:${SHARED_APPS_DIR}`,
         '-e', `INSTALLATION_TOKEN=${installationToken}`,
         '-e', `REPO_FULL_NAME=${fullName}`,
         '-e', `BRANCH=${branchName}`,
+        '-e', `DEPLOY_PATH=${deployPath}`,
+        '-e', `APPS_DIR=${SHARED_APPS_DIR}`,
         '-e', `AZURE_ACCOUNT=${process.env.AZURE_ACCOUNT}`,
         '-e', `AZURE_STORAGE_KEY=${process.env.AZURE_STORAGE_KEY}`,
-        '-e', `DEPLOY_PATH=${deployPath}`,
         'deploy'
       ];
 
-      console.log("Deployment Worker is working");
-
       await new Promise((resolve, reject) => {
-        const child = spawn('docker', dockerArgs, { stdio: 'inherit' });
+        // Using 'pipe' to capture output for MongoDB storage
+        const child = spawn('docker', dockerArgs);
+
+        child.stdout.on('data', (data) => {
+          const chunk = data.toString();
+          combinedLogs += chunk;
+          process.stdout.write(chunk); // Stream to terminal
+        });
+
+        child.stderr.on('data', (data) => {
+          const chunk = data.toString();
+          combinedLogs += chunk;
+          process.stderr.write(chunk); // Stream to terminal
+        });
+
         child.on('error', (err) => {
+          combinedLogs += `\nSpawn Error: ${err.message}`;
           reject(err);
         });
+
         child.on('exit', (code) => {
           if (code === 0) {
+            console.log(`\n   [${job.id}] ✅ Docker finished successfully.`);
             resolve();
           } else {
-            reject(new Error(`Docker process exited with code ${code}`));
+            console.error(`\n   [${job.id}] ❌ Docker failed with Exit Code: ${code}`);
+            reject(new Error(`Docker Exit ${code}`));
           }
         });
       });
 
-
-      // 4️⃣ Mark success
-      await Deployment.findByIdAndUpdate(deploymentId, {
-        status: 'success'
+      // Update success status and save logs
+      await Deployment.findByIdAndUpdate(deploymentId, { 
+        status: 'success',
+        logs: combinedLogs 
       });
+      console.log(`✅ [Job ${job.id}] Deployment Complete!`);
 
     } catch (error) {
-      // 5️⃣ Mark failure
-      await Deployment.findByIdAndUpdate(deploymentId, {
-        status: 'failed',
-        logs: error.toString()
+      console.error(`❌ [Job ${job.id}] Critical Failure:`, error.message);
+      
+      // Save logs even on failure so you can debug the npm/git errors
+      await Deployment.findByIdAndUpdate(deploymentId, { 
+        status: 'failed', 
+        logs: combinedLogs + `\nError: ${error.message}`
       });
-
       throw error;
     }
   },
-  { connection }
+  { 
+    connection,
+    concurrency: 1 
+  }
 );
 
-worker.on("completed", job => {
-    console.log(`Job completed: ${job.id}`);
-});
-
-worker.on("failed", (job, err) => {
-    console.log(`Job failed: ${job.id}`, err);
-})
+console.log("🛠️ Worker is active and listening for jobs...");

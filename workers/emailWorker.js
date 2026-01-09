@@ -1,3 +1,5 @@
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 const { Worker } = require('bullmq');
 const Redis = require('ioredis');
 const { sendOtpEmail } = require('../services/email.service'); // your existing Nodemailer function
