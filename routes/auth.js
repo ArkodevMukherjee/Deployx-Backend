@@ -6,22 +6,11 @@ const jwt = require('jsonwebtoken');
 const TempUser = require('../models/TempUser');
 const User = require('../models/User');
 const otpLimiter = require('../middlewares/otpLimiter');
-const { sendOtpEmail } = require('../services/email.service');
 const emailQueue = require('../queue/emailQueue')
 
-const router = express.Router();
+const { connection } = require("../redis")
 
-// --- Step 1: Create temporary user ---
-// router.post('/signup-temp', async (req, res) => {
-//   try {
-//     const { username, email, password } = req.body;
-//     const passwordHash = await bcrypt.hash(password, 10);
-//     await TempUser.create({ username, email, passwordHash });
-//     res.json({ success:true,message: 'Temporary signup created. Request OTP next.' });
-//   } catch (err) {
-//     res.status(500).json({ message: err.message });
-//   }
-// });
+const router = express.Router();
 
 
 router.post('/send-otp', otpLimiter, async (req, res) => {
@@ -58,7 +47,6 @@ router.post('/send-otp', otpLimiter, async (req, res) => {
 router.post('/verify-otp', async (req, res) => {
   try {
     const { email, otp, username, password } = req.body;
-    console.log(email,otp,username,password);
 
     if (!email || !otp || !username || !password) {
       return res.status(400).json({ message: 'Email, OTP, username, and password are required' });
@@ -66,7 +54,7 @@ router.post('/verify-otp', async (req, res) => {
 
     const otpHash = crypto.createHash('sha256').update(otp).digest('hex');
 
-    const tempUser = await TempUser.findOne({ email, otp:otpHash });
+    const tempUser = await TempUser.findOne({ email, otp: otpHash });
     if (!tempUser) return res.status(401).json({ message: 'Invalid or expired OTP' });
 
     // Hash password from frontend
@@ -84,6 +72,7 @@ router.post('/verify-otp', async (req, res) => {
 
     const token = jwt.sign({ id: user._id, provider: 'local' }, process.env.JWT_SECRET, { expiresIn: '1h' });
 
+    await emailQueue.add("thankOtp",{to:email});
     res.json({ message: 'Signup successful', token });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -138,5 +127,89 @@ router.post('/login', async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+
+// Forgot Password
+router.post('/forgot-password-otp', async (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.json({
+      message: "Email is needed to get the forgot password otp"
+    });
+  }
+
+
+  const user = await User.findOne({ email });
+  if (!user) {
+    return res.json({
+      message: "User does not exist need to login first"
+    })
+  }
+
+  else {
+    if (await connection.get(`${email}:forgot`)) {
+      return res.json({
+        message: "OTP already sent to the email"
+      });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const hashedOtp = await bcrypt.hash(otp, 10);
+    const val = await connection.set(`${email}:forgot`, hashedOtp, 'EX', 300);
+
+
+
+    await emailQueue.add("sendOtp", { to: email, otp });
+
+    return res.json({
+      message: "Otp has been queued in the backend"
+    });
+  }
+
+})
+
+// Forgot Password Verify Route
+router.post('/forgot-password-verify', async (req, res) => {
+  const { email, otp, password } = req.body;
+
+  if (!email || !otp || !password) {
+    return res.status(400).json({
+      message: "Missing email or otp or password"
+    });
+  }
+
+  const otpRedis = await connection.get(`${email}:forgot`);
+  if (!otpRedis) {
+    return res.status(401).json({
+      message: "Otp does not exist"
+    });
+  }
+
+  const isValid = await bcrypt.compare(otp, otpRedis);
+
+  if (!isValid) {
+    return res.status(401).json({
+      message: "Wrong otp try again"
+    });
+  }
+
+  else {
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(400).json({
+        message: "User does not exist"
+      })
+    }
+
+    user.passwordHash = await bcrypt.hash(password, 10);
+    await user.save();
+
+    await connection.del(`${email}:forgot`);
+    return res.status(200).json({
+      success: true,
+      message: "Otp verfied and password set up"
+    })
+  }
+})
 
 module.exports = router;

@@ -1,22 +1,22 @@
 #!/bin/bash
 set -e
 
-# Target is: /var/www/apps/installation-id/repo-id/deployment-id
+# Target is: /var/www/apps/repo-id/deployment-id
 TARGET_DIR="$APPS_DIR/$DEPLOY_PATH"
 
-echo "🚀 Cloning $REPO_FULL_NAME..."
+echo "Cloning $REPO_FULL_NAME..."
 git clone -b "$BRANCH" "https://x-access-token:${INSTALLATION_TOKEN}@github.com/${REPO_FULL_NAME}.git" repo
 cd repo
 
-echo "🔧 Building..."
+echo "Building..."
 npm install
 # Vite needs the base path to handle subfolders
 export VITE_BASE_PATH="/$DEPLOY_PATH/"
 npm run build
 
-echo "📁 Exporting to: $TARGET_DIR"
+echo "Exporting to: $TARGET_DIR"
 mkdir -p "$TARGET_DIR"
 rm -rf "$TARGET_DIR"/*
 cp -r dist/* "$TARGET_DIR/"
 
-echo "✅ Deployment Successful!"
+echo "Deployment Successful!"

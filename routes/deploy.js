@@ -7,7 +7,7 @@ const deployLimiter = require('../middlewares/deployLimiter');
 const deploymentQueue = require('../queue/deploymentQueue');
 const urlDeploymentQueue = require("../queue/urlDeploymentQueue");
 const authenticateJWT = require('../middlewares/authenticateJWT');
-const { redis } = require("../redis");
+const { connection } = require("../redis");
 
 const router = express.Router();
 
@@ -72,9 +72,6 @@ router.post('/', deployLimiter, authenticateJWT, async (req, res) => {
         return res.status(400).json({ message: 'URL is required' });
       }
 
-      const deployPath = `url-deploy/${req.user.id}/${Date.now()}`;
-      const deployedUrl = `${process.env.AZURE_WEB_ENDPOINT}/${deployPath}/`;
-
       const deployment = await Deployment.create({
         userId: req.user.id,
         deploymentType: 'url',
@@ -82,13 +79,20 @@ router.post('/', deployLimiter, authenticateJWT, async (req, res) => {
         environment,
         projectType,
         status: 'queued',
-        deployPath,
-        deployedUrl
       });
+
+      const deployPath = `${req.user.id}/${deployment._id}`;
+      const finalUrl = `${process.env.SERVER_ENDPOINT}/${deployPath}/`; // Create a local variable
+
+      deployment.deployPath = deployPath;
+      deployment.deployedUrl = finalUrl; // Match your schema naming
+      await deployment.save();
 
       await urlDeploymentQueue.add('url-deployment-queue', {
         deploymentId: deployment._id,
         url,
+        liveUrl:finalUrl,
+        userId:req.user.id,
         deployPath,
         projectType
       });
@@ -96,7 +100,7 @@ router.post('/', deployLimiter, authenticateJWT, async (req, res) => {
       return res.status(202).json({
         message: 'URL deployment queued',
         deploymentId: deployment._id,
-        deployedUrl
+        deployedUrl: finalUrl // Use the variable here
       });
     }
 
@@ -137,7 +141,7 @@ router.post('/', deployLimiter, authenticateJWT, async (req, res) => {
       });
 
       // Construction of the Deployment URL
-      const deployPath = `${installationId}/${finalRepoName}/${deployment._id}`;
+      const deployPath = `${req.user.id}/${deployment._id}`;
       const deployedUrl = `${process.env.SERVER_ENDPOINT}/${deployPath}/`;
 
       deployment.deployPath = deployPath;
@@ -147,11 +151,13 @@ router.post('/', deployLimiter, authenticateJWT, async (req, res) => {
       await deploymentQueue.add('deployment-queue', {
         deploymentId: deployment._id,
         installationId,
+        liveUrl:deployedUrl,
         repoId,
         fullName,
         branchName,
         deployPath,
-        projectType
+        projectType,
+        userId:req.user.id
       });
 
       return res.status(202).json({
@@ -198,7 +204,7 @@ router.get('/callback', async (req, res) => {
     );
 
     const code = crypto.randomUUID();
-    await redis.set(`github/installation:${code}`, installationId, 'EX', 600);
+    await connection.set(`github/installation:${code}`, installationId, 'EX', 600);
 
     return res.redirect(`${process.env.FRONTEND_URL}/deploy?code=${code}`);
   } catch (err) {
@@ -210,13 +216,13 @@ router.get('/callback', async (req, res) => {
 router.post("/exchange", async (req, res) => {
   try {
     const { code } = req.body;
-    const installation_id = await redis.get(`github/installation:${code}`);
-    
+    const installation_id = await connection.get(`github/installation:${code}`);
+
     if (!installation_id) {
       return res.status(401).json({ error: "Invalid or expired code" });
     }
 
-    await redis.del(`github/installation:${code}`);
+    await connection.del(`github/installation:${code}`);
 
     res.json({
       success: true,

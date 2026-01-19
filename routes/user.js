@@ -6,12 +6,8 @@ const Deployments = require("../models/Deployments")
 
 
 router.get("/", authenticateJWT, async (req, res) => {
-    console.log("User", req.user);
     const user = await User.findById(req.user.id);
-    console.log(req.user.id);
-    console.log(typeof req.user.id)
-    const deployments = await Deployments.find({userId:req.user.id});
-    console.log(deployments);
+    const deployments = await Deployments.find({ userId: req.user.id });
     res.json({
         "message": "success",
         user,

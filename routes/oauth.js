@@ -3,7 +3,7 @@ const express = require('express');
 const passport = require('passport');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-const { redis } = require("../redis");
+const { connection } = require("../redis");
 const crypto = require("crypto")
 
 const router = express.Router();

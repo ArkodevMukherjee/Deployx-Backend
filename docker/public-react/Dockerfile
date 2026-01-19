@@ -15,8 +15,6 @@ WORKDIR /app
 
 # Copy deploy script
 COPY deploy.sh /deploy.sh
-# This command deletes the ^M (carriage returns) automatically
-RUN sed -i 's/\r$//' /deploy.sh && chmod +x /deploy.sh
 RUN chmod +x /deploy.sh
 
 # Entrypoint runs the deployment

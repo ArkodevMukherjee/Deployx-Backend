@@ -2,32 +2,14 @@ const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 const { Worker } = require('bullmq');
 const Deployment = require('../models/Deployments');
-const Redis = require("ioredis");
-const mongoose = require("mongoose");
+const {connectToDb} = require("../connectToDb");
+const emailQueue = require("../queue/emailQueue");
+const User = require("../models/User");
 const fs = require("fs");
 const jwt = require("jsonwebtoken");
 const axios = require("axios");
 const { spawn } = require('child_process');
-
-// Redis Connection
-const connection = new Redis({
-  host: "127.0.0.1",
-  port: 6379,
-  maxRetriesPerRequest: null
-});
-
-connection.on("error", (err) => console.error("❌ Redis Connection Error:", err));
-connection.on("connect", () => console.log("✅ Worker connected to Redis"));
-
-const SHARED_APPS_DIR = '/var/www/apps';
-
-// MongoDB Connection
-mongoose.connect(`${process.env.MONGO_URI}/github-app`)
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch(err => {
-    console.error('❌ MongoDB Connection Error:', err);
-    process.exit(1);
-  });
+const { connection } = require("../redis");
 
 /**
  * Generates a GitHub App JWT
@@ -64,10 +46,22 @@ async function getInstallationToken(installationId, appJwt) {
     );
     return response.data.token;
   } catch (err) {
-    console.error('❌ Error fetching installation token:', err.response?.data || err.message);
+    console.error('Error fetching installation token:', err.response?.data || err.message);
     throw err;
   }
 }
+
+
+
+// const HOST_APPS_DIR = '/var/www/apps';
+const HOST_APPS_DIR = process.env.HOST_APPS_DIR;
+
+// MongoDB Connection
+(async () => {
+  await connectToDb();
+})();
+
+
 
 /**
  * BullMQ Worker
@@ -75,35 +69,43 @@ async function getInstallationToken(installationId, appJwt) {
 const worker = new Worker(
   'deployment-queue',
   async job => {
-    const { deploymentId, installationId, fullName, branchName } = job.data;
-    console.log(`\n🚀 [Job ${job.id}] Received deployment for: ${fullName}`);
 
+    // Data input to the worker from routes
+    const { deploymentId, installationId,deployPath, fullName, branchName, userId , liveUrl } = job.data;
+
+    // Logging the name in the format github-username/repository-name
+    console.log(`\n[Job ${job.id}] Received deployment for: ${fullName}`);
+
+    // Getting the repostory-name
     const repoName = fullName.split('/')[1];
-    const deployPath = `${installationId}/${repoName}/${deploymentId}`;
 
+    // Updating the deployment model data to the status inp progress to notify the user that the deployment process has been started in the server
     await Deployment.findByIdAndUpdate(deploymentId, { status: 'in_progress' });
 
-    let combinedLogs = ""; // Variable to store build output
+    let combinedLogs = "";
 
     try {
+      // Generating the Github JWT with the function generateAppJWT()
       console.log(`   [${job.id}] Generating GitHub JWT...`);
       const appJwt = generateAppJWT();
-      
+
+      // With the help of the jwt token and installationId the installation token is recieved from the github server to clone the private repository
       console.log(`   [${job.id}] Fetching Installation Token...`);
       const installationToken = await getInstallationToken(installationId, appJwt);
 
+      // Starting the docker container
       console.log(`   [${job.id}] Starting Docker container...`);
+
+      // These are the docker arguments
       const dockerArgs = [
         'run', '--rm',
-        '-v', `${SHARED_APPS_DIR}:${SHARED_APPS_DIR}`,
+        '-v', `${HOST_APPS_DIR}:${HOST_APPS_DIR}`,
         '-e', `INSTALLATION_TOKEN=${installationToken}`,
         '-e', `REPO_FULL_NAME=${fullName}`,
         '-e', `BRANCH=${branchName}`,
         '-e', `DEPLOY_PATH=${deployPath}`,
-        '-e', `APPS_DIR=${SHARED_APPS_DIR}`,
-        '-e', `AZURE_ACCOUNT=${process.env.AZURE_ACCOUNT}`,
-        '-e', `AZURE_STORAGE_KEY=${process.env.AZURE_STORAGE_KEY}`,
-        'deploy'
+        '-e', `APPS_DIR=${HOST_APPS_DIR}`,
+        'deploy-react-private-image'
       ];
 
       await new Promise((resolve, reject) => {
@@ -129,37 +131,53 @@ const worker = new Worker(
 
         child.on('exit', (code) => {
           if (code === 0) {
-            console.log(`\n   [${job.id}] ✅ Docker finished successfully.`);
+            console.log(`\n   [${job.id}] Docker finished successfully.`);
             resolve();
           } else {
-            console.error(`\n   [${job.id}] ❌ Docker failed with Exit Code: ${code}`);
+            console.error(`\n   [${job.id}] Docker failed with Exit Code: ${code}`);
             reject(new Error(`Docker Exit ${code}`));
           }
         });
       });
 
       // Update success status and save logs
-      await Deployment.findByIdAndUpdate(deploymentId, { 
+      await Deployment.findByIdAndUpdate(deploymentId, {
         status: 'success',
-        logs: combinedLogs 
+        logs: combinedLogs
       });
-      console.log(`✅ [Job ${job.id}] Deployment Complete!`);
+
+      let user = await User.findById(userId);
+      let email = user.email;
+
+
+      if(email){
+        await emailQueue.add("githubDeploymentSuccessfulEmail",{to:email,liveUrl:liveUrl});
+      }
+
+      console.log(`[Job ${job.id}] Deployment Complete!`);
 
     } catch (error) {
-      console.error(`❌ [Job ${job.id}] Critical Failure:`, error.message);
-      
+      let user = await User.findById(userId);
+      let email = user.email;
+
+
+      if(email){
+        await emailQueue.add("githubDeploymentFailedEmail",{to:email});
+      }
+      console.error(`[Job ${job.id}] Critical Failure:`, error.message);
+
       // Save logs even on failure so you can debug the npm/git errors
-      await Deployment.findByIdAndUpdate(deploymentId, { 
-        status: 'failed', 
+      await Deployment.findByIdAndUpdate(deploymentId, {
+        status: 'failed',
         logs: combinedLogs + `\nError: ${error.message}`
       });
       throw error;
     }
   },
-  { 
+  {
     connection,
-    concurrency: 1 
+    concurrency: 1
   }
 );
 
-console.log("🛠️ Worker is active and listening for jobs...");
+console.log("Worker is active and listening for jobs...");

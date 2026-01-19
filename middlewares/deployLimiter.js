@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 
 const deployLimiter = rateLimit({
   windowMs: 10 * 60 * 1000, // 10 minutes
-  max: 5, // maximum 5 requests per window per IP
+  max: 20, // maximum 5 requests per window per IP
   message: {
     status: 429,
     error: 'Too many deployment requests from this IP, please try again after 10 minutes.'
