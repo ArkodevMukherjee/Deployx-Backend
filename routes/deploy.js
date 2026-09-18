@@ -1,56 +1,69 @@
+/**
+ * @file deploy.js
+ * @description Deployment routes for GitHub App repositories and arbitrary Git URLs.
+ * Integrates BullMQ asynchronous queues, rate limiting, and JWT authentication.
+ */
+
 const express = require('express');
-const crypto = require('crypto'); // Ensure crypto is imported for randomUUID
+const crypto = require('crypto');
 const Installation = require('../models/Installation');
 const Deployment = require('../models/Deployments');
-
 const deployLimiter = require('../middlewares/deployLimiter');
 const deploymentQueue = require('../queue/deploymentQueue');
-const urlDeploymentQueue = require("../queue/urlDeploymentQueue");
+const urlDeploymentQueue = require('../queue/urlDeploymentQueue');
 const authenticateJWT = require('../middlewares/authenticateJWT');
-const { connection } = require("../redis");
+const { connection } = require('../redis');
+const {
+  buildDeployPath,
+  buildDeployedUrl,
+  extractRepoName,
+  sendSuccess,
+  sendError
+} = require('../utility');
 
 const router = express.Router();
 
 /**
- * GET /repositories
- * Called by frontend AFTER GitHub redirect
+ * GET /deploy/repositories
+ * Returns the list of repositories associated with an authorized GitHub App installation.
  */
 router.get('/repositories', authenticateJWT, async (req, res) => {
   try {
     const rawInstallationId = req.query.installationId || req.query.installation_id;
 
     if (!rawInstallationId) {
-      return res.status(400).json({ message: 'installation_id is required' });
+      return sendError(res, 'installation_id query parameter is required', 400);
     }
 
     const installationId = Number(rawInstallationId);
     if (Number.isNaN(installationId)) {
-      return res.status(400).json({ message: 'installation_id must be a number' });
+      return sendError(res, 'installation_id must be a valid number', 400);
     }
 
     const installation = await Installation.findOne({ installationId });
-
     if (!installation) {
-      return res.status(404).json({ message: 'Installation not found' });
+      return sendError(res, 'GitHub installation not found', 404);
     }
 
-    const repositories = installation.repositories.map(repo => ({
+    const repositories = (installation.repositories || []).map(repo => ({
       repoId: repo.repoId,
       name: repo.name,
-      fullName: repo.fullName
+      fullName: repo.fullName,
+      cloneUrl: repo.cloneUrl
     }));
 
-    return res.status(200).json({ repositories });
+    return res.status(200).json({
+      success: true,
+      repositories
+    });
   } catch (err) {
-    console.error('[GET /repositories]', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    return sendError(res, 'Failed to fetch repositories for installation', 500, err);
   }
 });
 
 /**
  * POST /deploy
- * JWT protected
- * Queues async deployment job
+ * Queues an asynchronous deployment for either a GitHub App repository or a public Git URL.
  */
 router.post('/', deployLimiter, authenticateJWT, async (req, res) => {
   try {
@@ -59,61 +72,78 @@ router.post('/', deployLimiter, authenticateJWT, async (req, res) => {
       installationId: rawInstallationId,
       repoId,
       url,
-      repoName: bodyRepoName, // Renamed to avoid collision
+      repoName: bodyRepoName,
       fullName,
       branchName = 'main',
       environment = 'production',
       projectType
     } = req.body;
 
-    /* ---------- URL DEPLOYMENT ---------- */
+    /* ==========================================================================
+       CASE 1: PUBLIC / CUSTOM GIT URL DEPLOYMENT
+       ========================================================================== */
     if (isUrlDeployment === true) {
       if (!url) {
-        return res.status(400).json({ message: 'URL is required' });
+        return sendError(res, 'Git repository URL is required for URL deployments', 400);
       }
 
+      // Create initial Deployment record
       const deployment = await Deployment.create({
         userId: req.user.id,
         deploymentType: 'url',
-        url,
+        url: url.trim(),
         environment,
         projectType,
-        status: 'queued',
+        status: 'queued'
       });
 
-      const deployPath = `${req.user.id}/${deployment._id}`;
-      const finalUrl = `${process.env.SERVER_ENDPOINT}/${deployPath}/`; // Create a local variable
+      const deployPath = buildDeployPath(req.user.id, deployment._id);
+      const liveUrl = buildDeployedUrl(process.env.SERVER_ENDPOINT, deployPath);
 
-      deployment.deployPath = deployPath;
-      deployment.deployedUrl = finalUrl; // Match your schema naming
+      deployment.deploypath = deployPath;
+      deployment.deployedUrl = liveUrl;
       await deployment.save();
 
-      await urlDeploymentQueue.add('url-deployment-queue', {
-        deploymentId: deployment._id,
-        url,
-        liveUrl:finalUrl,
-        userId:req.user.id,
-        deployPath,
-        projectType
-      });
+      // Enqueue deployment job in BullMQ
+      await urlDeploymentQueue.add(
+        'url-deployment-queue',
+        {
+          deploymentId: deployment._id,
+          url: url.trim(),
+          liveUrl,
+          userId: req.user.id,
+          deployPath,
+          projectType
+        },
+        {
+          attempts: 5,
+          backoff: {
+            type: 'exponential',
+            delay: 1000 // 1s
+          }
+        }
+      );
 
       return res.status(202).json({
-        message: 'URL deployment queued',
+        success: true,
+        message: 'URL deployment queued successfully',
         deploymentId: deployment._id,
-        deployedUrl: finalUrl // Use the variable here
+        deployedUrl: liveUrl
       });
     }
 
-    /* ---------- GITHUB DEPLOYMENT ---------- */
+    /* ==========================================================================
+       CASE 2: GITHUB APP REPOSITORY DEPLOYMENT
+       ========================================================================== */
     if (isUrlDeployment === false) {
       const installationId = Number(rawInstallationId);
       if (!installationId || !repoId || !fullName) {
-        return res.status(400).json({ message: 'Missing GitHub fields' });
+        return sendError(res, 'Missing required GitHub deployment fields (installationId, repoId, fullName)', 400);
       }
 
       const installation = await Installation.findOne({ installationId });
       if (!installation) {
-        return res.status(404).json({ message: 'Installation not found' });
+        return sendError(res, 'GitHub installation not found', 404);
       }
 
       const repo = installation.repositories.find(
@@ -121,12 +151,12 @@ router.post('/', deployLimiter, authenticateJWT, async (req, res) => {
       );
 
       if (!repo) {
-        return res.status(404).json({ message: 'Repository not found in this installation' });
+        return sendError(res, 'Repository not found in this GitHub App installation', 404);
       }
 
-      // Logic Check: Correctly derive the repoName for the URL
-      const finalRepoName = bodyRepoName || fullName.split('/')[1] || 'unknown-repo';
+      const finalRepoName = extractRepoName(fullName, bodyRepoName);
 
+      // Create initial Deployment record
       const deployment = await Deployment.create({
         userId: req.user.id,
         deploymentType: 'github',
@@ -140,57 +170,68 @@ router.post('/', deployLimiter, authenticateJWT, async (req, res) => {
         status: 'queued'
       });
 
-      // Construction of the Deployment URL
-      const deployPath = `${req.user.id}/${deployment._id}`;
-      const deployedUrl = `${process.env.SERVER_ENDPOINT}/${deployPath}/`;
+      const deployPath = buildDeployPath(req.user.id, deployment._id);
+      const liveUrl = buildDeployedUrl(process.env.SERVER_ENDPOINT, deployPath);
 
-      deployment.deployPath = deployPath;
-      deployment.deployedUrl = deployedUrl;
+      deployment.deploypath = deployPath;
+      deployment.deployedUrl = liveUrl;
       await deployment.save();
 
-      await deploymentQueue.add('deployment-queue', {
-        deploymentId: deployment._id,
-        installationId,
-        liveUrl:deployedUrl,
-        repoId,
-        fullName,
-        branchName,
-        deployPath,
-        projectType,
-        userId:req.user.id
-      });
+      // Enqueue GitHub deployment job in BullMQ
+      await deploymentQueue.add(
+        'deployment-queue',
+        {
+          deploymentId: deployment._id,
+          installationId,
+          liveUrl,
+          repoId,
+          fullName,
+          branchName,
+          deployPath,
+          projectType,
+          userId: req.user.id
+        },
+        {
+          attempts: 5,
+          backoff: {
+            type: 'exponential',
+            delay: 1000
+          }
+        }
+      );
 
       return res.status(202).json({
-        message: 'GitHub deployment queued',
+        success: true,
+        message: 'GitHub deployment queued successfully',
         deploymentId: deployment._id,
-        deployedUrl
+        deployedUrl: liveUrl
       });
     }
 
-    return res.status(400).json({ message: 'Invalid deployment type' });
-
+    return sendError(res, 'Invalid or missing isUrlDeployment flag (must be boolean true or false)', 400);
   } catch (err) {
-    console.error('[POST /deploy]', err);
-    return res.status(500).json({ message: 'Server error' });
+    return sendError(res, 'Failed to queue deployment', 500, err);
   }
 });
 
 /**
- * GitHub App installation callback
+ * GET /deploy/callback
+ * GitHub App installation callback redirect handler.
  */
 router.get('/callback', async (req, res) => {
   try {
     const { installation_id } = req.query;
 
     if (!installation_id) {
-      return res.status(400).send('Missing installation_id');
+      return sendError(res, 'Missing installation_id parameter', 400);
     }
 
     const installationId = Number(installation_id);
     if (Number.isNaN(installationId)) {
-      return res.status(400).send('Invalid installation_id');
+      return sendError(res, 'Invalid installation_id parameter', 400);
     }
 
+    // Ensure installation record exists in database
     await Installation.updateOne(
       { installationId },
       {
@@ -204,33 +245,42 @@ router.get('/callback', async (req, res) => {
     );
 
     const code = crypto.randomUUID();
+    // Cache installation token exchange code for 10 minutes (600 seconds)
     await connection.set(`github/installation:${code}`, installationId, 'EX', 600);
 
-    return res.redirect(`${process.env.FRONTEND_URL}/deploy?code=${code}`);
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    return res.redirect(`${frontendUrl}/deploy?code=${code}`);
   } catch (err) {
-    console.error('[GitHub Install Callback]', err);
-    return res.status(500).send('Internal server error');
+    console.error('[GitHub Install Callback Error]:', err);
+    return sendError(res, 'Internal server error during GitHub callback', 500, err);
   }
 });
 
-router.post("/exchange", async (req, res) => {
+/**
+ * POST /deploy/exchange
+ * Exchanges an installation callback code for the corresponding GitHub installation ID.
+ */
+router.post('/exchange', async (req, res) => {
   try {
     const { code } = req.body;
-    const installation_id = await connection.get(`github/installation:${code}`);
 
-    if (!installation_id) {
-      return res.status(401).json({ error: "Invalid or expired code" });
+    if (!code) {
+      return sendError(res, 'Installation code is required', 400);
     }
 
+    const installationId = await connection.get(`github/installation:${code}`);
+    if (!installationId) {
+      return sendError(res, 'Invalid or expired installation code', 401);
+    }
+
+    // Consume code once
     await connection.del(`github/installation:${code}`);
 
-    res.json({
-      success: true,
-      installation_id
+    return sendSuccess(res, 'Installation ID verified', {
+      installation_id: Number(installationId)
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error" });
+    return sendError(res, 'Failed to exchange installation code', 500, err);
   }
 });
 

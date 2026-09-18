@@ -1,121 +1,157 @@
+/**
+ * @file auth.js
+ * @description Authentication routes handling OTP-based signup, credential login,
+ * and password recovery workflows.
+ */
+
 const express = require('express');
 const bcrypt = require('bcrypt');
-const crypto = require('crypto');
-const jwt = require('jsonwebtoken');
-
 const TempUser = require('../models/TempUser');
 const User = require('../models/User');
 const otpLimiter = require('../middlewares/otpLimiter');
-const emailQueue = require('../queue/emailQueue')
-
-const { connection } = require("../redis")
+const emailQueue = require('../queue/emailQueue');
+const { connection } = require('../redis');
+const {
+  generateOtp,
+  hashOtp,
+  generateUserToken,
+  sendSuccess,
+  sendError
+} = require('../utility');
 
 const router = express.Router();
 
-
+/**
+ * POST /auth/send-otp
+ * Generates and sends a 6-digit OTP for email verification during signup.
+ */
 router.post('/send-otp', otpLimiter, async (req, res) => {
   try {
     const { email } = req.body;
-    if (!email) return res.status(400).json({ message: 'Email is required' });
+    if (!email) {
+      return sendError(res, 'Email is required', 400);
+    }
 
-    // Find existing temp user
+    // Check if user is already registered
+    const existingUser = await User.findOne({ email });
+    if (existingUser && existingUser.authProviders.includes('local')) {
+      return sendError(res, 'User with this email already exists. Please log in.', 409);
+    }
+
+    // Find or create temporary user record
     let tempUser = await TempUser.findOne({ email });
-
-    // If not found, create a new temp user with just email
     if (!tempUser) {
       tempUser = await TempUser.create({ email });
     }
 
-    // Generate OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    tempUser.otp = crypto.createHash('sha256').update(otp).digest('hex');
-
-
+    // Generate 6-digit OTP and store SHA-256 hash
+    const otp = generateOtp(6);
+    tempUser.otp = hashOtp(otp);
     await tempUser.save();
 
-    // Send OTP via email queue
-    await emailQueue.add('sendOtp', { to: email, otp });
+    // Queue OTP dispatch email via BullMQ
+    await emailQueue.add(
+      'sendOtp',
+      { to: email, otp },
+      {
+        attempts: 5,
+        backoff: {
+          type: 'exponential',
+          delay: 1000 // 1s initial delay
+        }
+      }
+    );
 
-    res.json({ success: true, message: 'OTP sent to email.' });
+    return sendSuccess(res, 'OTP sent to email successfully.', { email });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    return sendError(res, 'Failed to send OTP', 500, err);
   }
 });
 
-
-
+/**
+ * POST /auth/verify-otp
+ * Verifies the provided OTP, registers the permanent user, and returns a JWT session.
+ */
 router.post('/verify-otp', async (req, res) => {
   try {
     const { email, otp, username, password } = req.body;
 
     if (!email || !otp || !username || !password) {
-      return res.status(400).json({ message: 'Email, OTP, username, and password are required' });
+      return sendError(res, 'Email, OTP, username, and password are required', 400);
     }
 
-    const otpHash = crypto.createHash('sha256').update(otp).digest('hex');
-
+    const otpHash = hashOtp(otp);
     const tempUser = await TempUser.findOne({ email, otp: otpHash });
-    if (!tempUser) return res.status(401).json({ message: 'Invalid or expired OTP' });
 
-    // Hash password from frontend
+    if (!tempUser) {
+      return sendError(res, 'Invalid or expired OTP', 401);
+    }
+
+    // Hash user password with salt rounds = 10
     const passwordHash = await bcrypt.hash(password, 10);
 
     const user = await User.create({
       username,
-      email: tempUser.email,   // keep email from tempUser
+      email: tempUser.email,
       passwordHash,
       authProviders: ['local']
     });
 
-    // Delete temp user
+    // Clean up temporary user record
     await TempUser.deleteOne({ _id: tempUser._id });
 
-    const token = jwt.sign({ id: user._id, provider: 'local' }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    // Generate authenticated JWT
+    const token = generateUserToken({ id: user._id, provider: 'local' }, '1h');
 
-    await emailQueue.add("thankOtp",{to:email});
-    res.json({ message: 'Signup successful', token });
+    // Asynchronously dispatch welcome email
+    await emailQueue.add(
+      'thankOtp',
+      { to: email },
+      {
+        attempts: 5,
+        backoff: {
+          type: 'exponential',
+          delay: 1000
+        }
+      }
+    );
+
+    return sendSuccess(res, 'Signup successful', { token, user: { id: user._id, username: user.username, email: user.email } }, 201);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    return sendError(res, 'Signup verification failed', 500, err);
   }
 });
 
-
-// --- Login Route ---
+/**
+ * POST /auth/login
+ * Validates user credentials and issues a JWT token.
+ */
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ message: 'Email and password required' });
+      return sendError(res, 'Email and password are required', 400);
     }
 
     const user = await User.findOne({ email });
-
     if (!user) {
-      return res.status(401).json({ message: 'Invalid credentials' });
+      return sendError(res, 'Invalid email or password', 401);
     }
 
-    // If user registered via OAuth only
+    // Verify if account supports local password login
     if (!user.authProviders.includes('local')) {
-      return res.status(403).json({
-        message: 'Please login using OAuth provider'
-      });
+      return sendError(res, 'Please log in using your OAuth provider (GitHub)', 403);
     }
 
     const isMatch = await bcrypt.compare(password, user.passwordHash);
-
     if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid credentials' });
+      return sendError(res, 'Invalid email or password', 401);
     }
 
-    const token = jwt.sign(
-      { id: user._id, provider: 'local' },
-      process.env.JWT_SECRET,
-      { expiresIn: '1h' }
-    );
+    const token = generateUserToken({ id: user._id, provider: 'local' }, '1h');
 
-    res.json({
-      message: 'Login successful',
+    return sendSuccess(res, 'Login successful', {
       token,
       user: {
         id: user._id,
@@ -124,92 +160,98 @@ router.post('/login', async (req, res) => {
       }
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    return sendError(res, 'Login failed', 500, err);
   }
 });
 
-// Forgot Password
+/**
+ * POST /auth/forgot-password-otp
+ * Generates an OTP for forgotten password recovery and caches it in Redis with 5-min TTL.
+ */
 router.post('/forgot-password-otp', async (req, res) => {
-  const { email } = req.body;
+  try {
+    const { email } = req.body;
 
-  if (!email) {
-    return res.json({
-      message: "Email is needed to get the forgot password otp"
-    });
-  }
-
-
-  const user = await User.findOne({ email });
-  if (!user) {
-    return res.json({
-      message: "User does not exist need to login first"
-    })
-  }
-
-  else {
-    if (await connection.get(`${email}:forgot`)) {
-      return res.json({
-        message: "OTP already sent to the email"
-      });
+    if (!email) {
+      return sendError(res, 'Email is required to request a password reset OTP', 400);
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const hashedOtp = await bcrypt.hash(otp, 10);
-    const val = await connection.set(`${email}:forgot`, hashedOtp, 'EX', 300);
-
-
-
-    await emailQueue.add("sendOtp", { to: email, otp });
-
-    return res.json({
-      message: "Otp has been queued in the backend"
-    });
-  }
-
-})
-
-// Forgot Password Verify Route
-router.post('/forgot-password-verify', async (req, res) => {
-  const { email, otp, password } = req.body;
-
-  if (!email || !otp || !password) {
-    return res.status(400).json({
-      message: "Missing email or otp or password"
-    });
-  }
-
-  const otpRedis = await connection.get(`${email}:forgot`);
-  if (!otpRedis) {
-    return res.status(401).json({
-      message: "Otp does not exist"
-    });
-  }
-
-  const isValid = await bcrypt.compare(otp, otpRedis);
-
-  if (!isValid) {
-    return res.status(401).json({
-      message: "Wrong otp try again"
-    });
-  }
-
-  else {
     const user = await User.findOne({ email });
     if (!user) {
-      return res.status(400).json({
-        message: "User does not exist"
-      })
+      return sendError(res, 'No account found with this email address', 404);
+    }
+
+    // Rate-limit check in Redis: prevent spamming OTPs if one is already active
+    const existingOtp = await connection.get(`${email}:forgot`);
+    if (existingOtp) {
+      return sendError(res, 'An OTP has already been sent to this email. Please check your inbox or wait 5 minutes.', 429);
+    }
+
+    const otp = generateOtp(6);
+    const hashedOtp = await bcrypt.hash(otp, 10);
+
+    // Cache hashed OTP in Redis for 300 seconds (5 minutes)
+    await connection.set(`${email}:forgot`, hashedOtp, 'EX', 300);
+
+    // Queue email dispatch
+    await emailQueue.add(
+      'sendOtp',
+      { to: email, otp },
+      {
+        attempts: 5,
+        backoff: {
+          type: 'exponential',
+          delay: 1000
+        }
+      }
+    );
+
+    return sendSuccess(res, 'Password reset OTP sent to your email.');
+  } catch (err) {
+    return sendError(res, 'Failed to process password reset request', 500, err);
+  }
+});
+
+/**
+ * POST /auth/forgot-password-verify
+ * Verifies recovery OTP from Redis and updates the user's password.
+ */
+router.post('/forgot-password-verify', async (req, res) => {
+  try {
+    const { email, otp, password } = req.body;
+
+    if (!email || !otp || !password) {
+      return sendError(res, 'Email, OTP, and new password are required', 400);
+    }
+
+    const storedHashedOtp = await connection.get(`${email}:forgot`);
+    if (!storedHashedOtp) {
+      return sendError(res, 'OTP has expired or does not exist. Please request a new one.', 401);
+    }
+
+    const isValid = await bcrypt.compare(otp, storedHashedOtp);
+    if (!isValid) {
+      return sendError(res, 'Invalid OTP. Please try again.', 401);
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return sendError(res, 'User account not found', 404);
     }
 
     user.passwordHash = await bcrypt.hash(password, 10);
+    if (!user.authProviders.includes('local')) {
+      user.authProviders.push('local');
+    }
     await user.save();
 
+    // Invalidate Redis OTP after successful reset
     await connection.del(`${email}:forgot`);
-    return res.status(200).json({
-      success: true,
-      message: "Otp verfied and password set up"
-    })
+
+    return sendSuccess(res, 'Password has been successfully reset. You can now log in.');
+  } catch (err) {
+    return sendError(res, 'Failed to reset password', 500, err);
   }
-})
+});
 
 module.exports = router;

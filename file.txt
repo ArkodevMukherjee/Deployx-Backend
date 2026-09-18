@@ -1,0 +1,54 @@
+On branch main
+Your branch and 'origin/main' have diverged,
+and have 1 and 1 different commits each, respectively.
+  (use "git pull" if you want to integrate the remote branch with yours)
+
+You have unmerged paths.
+  (fix conflicts and run "git commit")
+  (use "git merge --abort" to abort the merge)
+
+Changes to be committed:
+	modified:   .gitignore
+	new file:   README.md
+	modified:   connectToDb.js
+	modified:   docker/Dockerfile
+	modified:   docker/deploy.sh
+	modified:   docker/public-react/Dockerfile
+	modified:   docker/public-react/deploy.sh
+	new file:   docker/public-react/upload-to-gcs.js
+	new file:   docker/upload-to-gcs.js
+	new file:   docs/API_DOCUMENTATION.md
+	new file:   docs/ARCHITECTURE.md
+	new file:   docs/DEPLOYMENT_PIPELINE.md
+	new file:   docs/GCP_STORAGE_GUIDE.md
+	new file:   docs/STUDENT_LEARNING_GUIDE.md
+	new file:   docs/WORKERS_AND_QUEUES.md
+	new file:   login-test.js
+	modified:   models/User.js
+	modified:   redis.js
+	modified:   routes/auth.js
+	modified:   routes/deploy.js
+	modified:   routes/user.js
+	modified:   routes/webhook.js
+	modified:   utility.js
+	new file:   utility/deploy.utility.js
+	new file:   utility/github.utility.js
+	new file:   utility/jwt.utility.js
+	new file:   utility/otp.utility.js
+	new file:   utility/response.utility.js
+	modified:   workers/deployment.js
+	modified:   workers/emailWorker.js
+
+Unmerged paths:
+  (use "git add <file>..." to mark resolution)
+	both modified:   app.js
+	both modified:   package-lock.json
+	both modified:   package.json
+	both modified:   routes/oauth.js
+	both modified:   workers/deploymentWorker.js
+	both modified:   workers/urlDeploymentWorker.js
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	file.txt
+

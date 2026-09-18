@@ -1,35 +1,34 @@
-// test-env.js
-require("dotenv").config();
+/**
+ * @file deployment.js
+ * @description Diagnostic script for debugging environment variables, paths, and secrets.
+ * Run via: node workers/deployment.js
+ */
+
 const path = require('path');
-
-console.log("=== Debugging .env Loading ===");
-
-// Show current working directory
-console.log("Current directory:", process.cwd()); 
-console.log("__dirname:", __dirname);
-
-// Try to find .env file
 const fs = require('fs');
-const envPath = path.join(__dirname, '.env');
-console.log("Looking for .env at:", envPath);
-console.log(".env exists:", fs.existsSync(envPath));
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
-if (fs.existsSync(envPath)) {
-  console.log(".env content:");
-  console.log(fs.readFileSync(envPath, 'utf8'));
-}
+console.log('=== DeployX Environment Diagnostics ===');
+console.log('Current working directory:', process.cwd());
+console.log('__dirname:', __dirname);
 
-// Show all loaded environment variables
-console.log("\n=== Loaded Environment Variables ===");
-console.log("GITHUB_APP_ID:", process.env.GITHUB_APP_ID);
-console.log("PORT:", process.env.PORT);
-console.log("MONGODB_URI:", process.env.MONGODB_URI);
-console.log("AZURE_STORAGE_KEY:", process.env.AZURE_STORAGE_KEY);
+const envPath = path.resolve(__dirname, '../.env');
+console.log('Resolved .env location:', envPath);
+console.log('.env file exists:', fs.existsSync(envPath));
 
-// Show all env vars that start with GITHUB
-console.log("\n=== GitHub Related Env Vars ===");
-for (const key in process.env) {
-  if (key.includes('GITHUB') || key.includes('APP')) {
-    console.log(`${key}: ${process.env[key]}`);
-  }
-}
+console.log('\n=== Key Environment Checks ===');
+console.log('NODE_ENV:', process.env.NODE_ENV || 'not set (defaults to development)');
+console.log('PORT:', process.env.PORT || '8000');
+console.log('MONGO_URI exists:', !!process.env.MONGO_URI);
+console.log('REDIS_URL exists:', !!process.env.REDIS_URL);
+console.log('JWT_SECRET exists:', !!process.env.JWT_SECRET);
+console.log('GITHUB_APP_ID:', process.env.GITHUB_APP_ID || 'not configured');
+console.log('HOST_APPS_DIR:', process.env.HOST_APPS_DIR || 'not configured');
+console.log('GCP_BUCKET_NAME:', process.env.GCP_BUCKET_NAME || 'not configured');
+console.log('GCP_KEY_FILE_PATH:', process.env.GCP_KEY_FILE_PATH || 'not configured');
+console.log('GCP_UPLOAD_MODE:', process.env.GCP_UPLOAD_MODE || 'archive');
+
+const privateKeyPath = path.resolve(__dirname, '../private4.pem');
+console.log('GitHub Private Key (private4.pem) exists:', fs.existsSync(privateKeyPath));
+
+console.log('\n=== Diagnostic Complete ===');
