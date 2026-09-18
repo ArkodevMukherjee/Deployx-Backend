@@ -54,7 +54,7 @@ async function getInstallationToken(installationId, appJwt) {
 
 
 // const HOST_APPS_DIR = '/var/www/apps';
-const HOST_APPS_DIR = process.env.HOST_APPS_DIR;
+const HOST_APPS_DIR = process.env.DOCKER_APPS_DIR;
 
 // MongoDB Connection
 (async () => {

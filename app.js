@@ -5,7 +5,7 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const { connectToDb } = require("./connectToDb")
 
-const authRouter = require('./routes/auth');
+const authRouter = require('./routes/auth2');
 const oauth = require('./routes/oauth');
 const webhookRouter = require('./routes/webhook');
 
@@ -46,7 +46,7 @@ app.use(cors({
 app.use('/auth', authRouter);
 app.use('/auth/github', oauth);
 app.use('/webhook', webhookRouter); // now rawBody exists
-app.use('/deploy', require("./routes/deploy"))
+app.use('/deploy', require("./routes/deploy2"))
 app.use('/dashboard', require("./routes/user"))
 
 app.get('/', (req, res) => {

@@ -53,7 +53,7 @@ router.get(
       const code = crypto.randomUUID();
 
       // Using string arguments (EX = seconds)
-      await redis.set(
+      await connection.set(
         `oauth:${code}`,          // key
         req.user._id.toString(),  // value
         'EX',                     // option for expiration
@@ -83,12 +83,12 @@ router.post("/exchange", async (req, res) => {
     const { code } = req.body;
     console.log(code);
 
-    const userId = await redis.get(`oauth:${code}`);
+    const userId = await connection.get(`oauth:${code}`);
     if (!userId) {
       return res.status(401).json({ error: "Invalid or expired code" });
     }
 
-    await redis.del(`oauth:${code}`);
+    await connection.del(`oauth:${code}`);
 
     const token = jwt.sign(
       { id: userId },
