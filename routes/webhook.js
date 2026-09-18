@@ -1,68 +1,77 @@
-// routes/webhook.js
+/**
+ * @file webhook.js
+ * @description GitHub Webhook receiver. Listens for GitHub App installation events,
+ * repository permissions changes, and code push events.
+ */
+
 const express = require('express');
 const router = express.Router();
-const Installation = require('../models/Installation'); // Your Installation model
-
-// Middleware to verify GitHub webhook signature (optional)
+const Installation = require('../models/Installation');
 const verifySignature = require('../middlewares/verifySignature');
 
+/**
+ * POST /webhook
+ * GitHub App webhook endpoint. Verified via HMAC SHA-256 signature middleware.
+ */
 router.post('/', verifySignature, async (req, res) => {
   const event = req.headers['x-github-event'];
   const payload = req.body;
 
-  console.log('Event:', event);
-  console.log('Action:', payload.action);
-  console.log('Installation ID:', payload.installation?.id);
+  console.log(`[GitHub Webhook] Received Event: "${event}", Action: "${payload?.action}", Installation ID: "${payload?.installation?.id}"`);
 
   try {
+    /* --------------------------------------------------------------------------
+       1. INSTALLATION EVENT (Created, Deleted, Suspended, Unsuspended)
+       -------------------------------------------------------------------------- */
     if (event === 'installation') {
       const { action, installation } = payload;
       const installationId = installation.id;
       const account = installation.account;
 
       if (action === 'created') {
-        // New installation → store in DB
         await Installation.findOneAndUpdate(
           { installationId },
           {
             installationId,
             accountLogin: account.login,
             accountType: account.type,
-            repositories: [], // will be filled via installation_repositories event
+            repositories: [],
             suspended: false
           },
           { upsert: true, new: true }
         );
-        console.log(`Stored new installation: ${installationId}`);
+        console.log(`[GitHub Webhook] Stored new GitHub App installation: ${installationId}`);
       }
 
       if (action === 'deleted') {
-        // Installation removed → delete from DB
         await Installation.deleteOne({ installationId });
-        console.log(`Deleted installation: ${installationId}`);
+        console.log(`[GitHub Webhook] Deleted GitHub App installation: ${installationId}`);
       }
 
       if (action === 'suspend') {
         await Installation.updateOne({ installationId }, { suspended: true });
-        console.log(`Suspended installation: ${installationId}`);
+        console.log(`[GitHub Webhook] Suspended GitHub App installation: ${installationId}`);
       }
 
       if (action === 'unsuspend') {
         await Installation.updateOne({ installationId }, { suspended: false });
-        console.log(`Unsuspended installation: ${installationId}`);
+        console.log(`[GitHub Webhook] Unsuspended GitHub App installation: ${installationId}`);
       }
     }
 
+    /* --------------------------------------------------------------------------
+       2. REPOSITORY PERMISSIONS EVENT (Repositories Added or Removed)
+       -------------------------------------------------------------------------- */
     if (event === 'installation_repositories') {
       const installationId = payload.installation.id;
 
-      // Repositories added
+      // Handle newly granted repositories
       if (payload.repositories_added?.length) {
         const reposToAdd = payload.repositories_added.map(repo => ({
           repoId: repo.id,
           name: repo.name,
           fullName: repo.full_name,
-          cloneUrl: `https://github.com/${repo.full_name}.git` // construct manually
+          cloneUrl: `https://github.com/${repo.full_name}.git`
         }));
 
         await Installation.updateOne(
@@ -70,24 +79,26 @@ router.post('/', verifySignature, async (req, res) => {
           { $addToSet: { repositories: { $each: reposToAdd } } },
           { upsert: true }
         );
-        console.log(`Added repositories for installation: ${installationId}`, reposToAdd);
+        console.log(`[GitHub Webhook] Added ${reposToAdd.length} repositories for installation: ${installationId}`);
       }
 
-      // Repositories removed
+      // Handle revoked repositories
       if (payload.repositories_removed?.length) {
         const repoIdsToRemove = payload.repositories_removed.map(r => r.id);
         await Installation.updateOne(
           { installationId },
           { $pull: { repositories: { repoId: { $in: repoIdsToRemove } } } }
         );
-        console.log(`Removed repositories for installation: ${installationId}`, repoIdsToRemove);
+        console.log(`[GitHub Webhook] Removed ${repoIdsToRemove.length} repositories for installation: ${installationId}`);
       }
     }
 
-    // Optional: handle push events if you want to track deployments
+    /* --------------------------------------------------------------------------
+       3. PUSH EVENT (Optional CI/CD auto-deploy trigger)
+       -------------------------------------------------------------------------- */
     if (event === 'push') {
-      const repoId = payload.repository.id;
-      const repoFullName = payload.repository.full_name;
+      const repoId = payload.repository?.id;
+      const repoFullName = payload.repository?.full_name;
 
       const installationDoc = await Installation.findOne({
         'repositories.repoId': repoId,
@@ -95,15 +106,15 @@ router.post('/', verifySignature, async (req, res) => {
       });
 
       if (installationDoc) {
-        console.log(`Push event received for repo ${repoFullName}`);
-        // You can update Deployment collection or trigger a deploy here
+        console.log(`[GitHub Webhook] Push event detected on verified repository: ${repoFullName}`);
+        // Future extension: trigger auto-redeploy job
       }
     }
 
-    res.status(200).send('OK');
+    return res.status(200).send('Webhook processed successfully');
   } catch (err) {
-    console.error('Webhook error:', err);
-    res.status(500).send('Webhook failed');
+    console.error('[GitHub Webhook Error]:', err);
+    return res.status(500).send('Webhook handler error');
   }
 });
 

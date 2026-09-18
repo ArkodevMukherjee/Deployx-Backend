@@ -24,6 +24,7 @@
     "mongoose": "^9.0.2",
     "nodemailer": "^7.0.11",
     "passport": "^0.7.0",
-    "passport-github2": "^0.1.12"
+    "passport-github2": "^0.1.12",
+    "prom-client": "^15.1.3"
   }
 }

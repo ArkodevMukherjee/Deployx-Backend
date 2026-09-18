@@ -6,3 +6,6 @@ github.json
 private.pem
 private4.pem
 .env
+local.env
+.dev.env
+main-503511-ea4ca8083982.json

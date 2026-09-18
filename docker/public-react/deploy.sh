@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 
 # Ensure TARGET_DIR is set correctly
@@ -11,6 +11,8 @@ echo "--- Step 1: Cloning Repository ---"
 git clone "$URL" repo
 cd repo
 
+echo "--- Step 1.5: Uploading Source Code to GCP Bucket ---"
+node /scripts/upload-to-gcs.js .
 
 echo "--- Step 2: Building Project ---"
 npm install

@@ -1,14 +1,24 @@
-require("dotenv").config();
+/**
+ * @file oauth.js
+ * @description GitHub OAuth 2.0 authentication flow and short-lived exchange token handler.
+ */
+
+require('dotenv').config();
 const express = require('express');
 const passport = require('passport');
-const jwt = require('jsonwebtoken');
+const GitHubStrategy = require('passport-github2').Strategy;
+const crypto = require('crypto');
 const User = require('../models/User');
-const { connection } = require("../redis");
-const crypto = require("crypto")
+const { connection } = require('../redis');
+const {
+  generateUserToken,
+  sendSuccess,
+  sendError
+} = require('../utility');
 
 const router = express.Router();
-const GitHubStrategy = require('passport-github2').Strategy;
 
+// Configure Passport GitHub Strategy
 passport.use(
   new GitHubStrategy(
     {
@@ -18,12 +28,11 @@ passport.use(
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        // Find user by GitHub ID (globally unique)
         let user = await User.findOne({ githubId: profile.id });
 
         if (!user) {
           user = await User.create({
-            username: profile.username,
+            username: profile.username || profile.displayName || `github_${profile.id}`,
             githubId: profile.id,
             authProviders: ['github']
           });
@@ -37,77 +46,82 @@ passport.use(
   )
 );
 
-
-// --- Start GitHub OAuth login ---
+/**
+ * GET /auth/github
+ * Initiates the GitHub OAuth authorization redirect.
+ */
 router.get('/', passport.authenticate('github', { scope: ['user:email'] }));
 
-// --- GitHub callback ---
+/**
+ * GET /auth/github/callback
+ * Handles the OAuth redirect from GitHub, generates a secure exchange code, and redirects to frontend.
+ */
 router.get(
-  "/callback",
-  passport.authenticate("github", {
+  '/callback',
+  passport.authenticate('github', {
     session: false,
-    failureRedirect: "https://deployx-frontend.vercel.app/login"
+    failureRedirect: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=oauth_failed`
   }),
   async (req, res) => {
     try {
       const code = crypto.randomUUID();
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
 
-      // Using string arguments (EX = seconds)
-      await redis.set(
-        `oauth:${code}`,          // key
-        req.user._id.toString(),  // value
-        'EX',                     // option for expiration
-        60                        // expiration in seconds
-      );
+      // Store one-time exchange code in Redis for 60 seconds
+      await connection.set(`oauth:${code}`, req.user._id.toString(), 'EX', 60);
 
-
-      res.redirect(
-        `https://deployx-frontend.vercel.app/login?code=${code}`
-      );
+      return res.redirect(`${frontendUrl}/login?code=${code}`);
     } catch (err) {
-      console.error(err);
-      res.redirect("https://deployx-frontend.vercel.app/login");
+      console.error('[OAuth Callback Error]:', err);
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+      return res.redirect(`${frontendUrl}/login?error=server_error`);
     }
   }
 );
 
-router.get("/deploy",(req,res)=>{
-  res.redirect("https://deployx-frontend.vercel.app/deploy");
-})
+/**
+ * GET /auth/github/deploy
+ * Convenience redirect for frontend deployment view.
+ */
+router.get('/deploy', (req, res) => {
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+  return res.redirect(`${frontendUrl}/deploy`);
+});
 
-/* =========================
-   TOKEN EXCHANGE
-========================= */
-router.post("/exchange", async (req, res) => {
+/**
+ * POST /auth/github/exchange
+ * Exchanges a short-lived one-time code for a long-lived JWT authentication token.
+ */
+router.post('/exchange', async (req, res) => {
   try {
     const { code } = req.body;
-    console.log(code);
 
-    const userId = await redis.get(`oauth:${code}`);
-    if (!userId) {
-      return res.status(401).json({ error: "Invalid or expired code" });
+    if (!code) {
+      return sendError(res, 'Exchange code is required', 400);
     }
 
-    await redis.del(`oauth:${code}`);
+    const userId = await connection.get(`oauth:${code}`);
+    if (!userId) {
+      return sendError(res, 'Invalid or expired exchange code', 401);
+    }
 
-    const token = jwt.sign(
-      { id: userId },
-      process.env.JWT_SECRET,
-      { expiresIn: "1hr" }
-    );
+    // Immediately consume the one-time code to prevent replay attacks
+    await connection.del(`oauth:${code}`);
 
-    res.json({
-      success:true,
-      token
-    })
+    const token = generateUserToken({ id: userId, provider: 'github' }, '1h');
+
+    return sendSuccess(res, 'Token exchanged successfully', { token });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error" });
+    return sendError(res, 'Failed to exchange authorization code', 500, err);
   }
 });
 
-// Optional failure route
-router.get('/failure', (req, res) => res.status(401).json({ message: 'OAuth failed' }));
+/**
+ * GET /auth/github/failure
+ * Fallback route when OAuth authorization fails.
+ */
+router.get('/failure', (req, res) => {
+  return sendError(res, 'OAuth authentication failed', 401);
+});
 
 module.exports = router;
-
